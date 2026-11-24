@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>北巷商城</title>
+  <link rel="stylesheet" href="/assets/styles.css?v=7" />
+</head>
+<body>
+  <div class="shortcut">
+    <div class="wrap shortcut-row">
+      <span class="loc">北京</span>
+      <div class="shortcut-links" id="account"></div>
+    </div>
+  </div>
+
+  <header class="mast">
+    <div class="wrap mast-row">
+      <button class="logo" data-view="shop" type="button"><i>北</i><span>北巷商城</span></button>
+      <div class="search-box">
+        <form id="search-form" class="search">
+          <input id="keyword" placeholder="机械键盘" autocomplete="off" />
+          <button type="submit">搜索</button>
+        </form>
+        <div class="hot">
+          <button type="button" data-hot="键盘">键盘</button>
+          <button type="button" data-hot="耳机">耳机</button>
+          <button type="button" data-hot="咖啡">咖啡</button>
+          <button type="button" data-hot="围巾">围巾</button>
+        </div>
+      </div>
+      <button class="cart-entry" data-view="cart" type="button">我的购物车<em id="cart-count">0</em></button>
+    </div>
+    <nav class="wrap cate-nav" id="cate-nav"></nav>
+  </header>
+
+  <main id="app"></main>
+  <footer class="site-foot"><div class="wrap">北巷商城 · 商品价格以结算页为准</div></footer>
+  <div class="toast" id="toast" hidden></div>
+  <script src="/assets/app.js?v=9"></script>
+</body>
+</html>
