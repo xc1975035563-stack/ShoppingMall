@@ -7,10 +7,11 @@
 
 from datetime import datetime, timedelta
 
-from fastapi import HTTPException
 from sqlalchemy import update
 from sqlalchemy.orm import Session, joinedload
 
+from app.audit import write_audit
+from app.errors import TradeError
 from app.models import Address, Cart, Item, Order, OrderDetail, PayOrder, User
 from app.schemas import OrderCreate, PayApplyIn
 from app.security import verify_password
@@ -24,15 +25,35 @@ ORDER_REFUNDED = 6
 BALANCE_PAY = 5
 
 
+def _who(user: User) -> tuple[int, str]:
+    return user.id, user.username
+
+
+def _fail(
+    db: Session,
+    user: User,
+    order_id: int | None,
+    action: str,
+    code: str,
+    message: str,
+    status: int = 400,
+) -> None:
+    user_id, username = _who(user)
+    db.rollback()
+    write_audit(db, user_id, username, order_id, action, False, code, message)
+    db.commit()
+    raise TradeError(code, message, status)
+
+
 def create_order(db: Session, user: User, form: OrderCreate) -> Order:
     address = db.get(Address, form.address_id)
     if address is None or address.user_id != user.id:
-        raise HTTPException(status_code=400, detail="收货地址不存在")
+        _fail(db, user, None, "create_order", "ADDRESS_NOT_FOUND", "收货地址不存在")
 
     item_num = {line.item_id: line.num for line in form.details}
     items = db.query(Item).filter(Item.id.in_(item_num), Item.status == 1).all()
     if len(items) < len(item_num):
-        raise HTTPException(status_code=400, detail="商品不存在或已下架")
+        _fail(db, user, None, "create_order", "ITEM_NOT_ON_SALE", "商品不存在或已下架")
 
     total = 0
     for item in items:
@@ -75,8 +96,16 @@ def create_order(db: Session, user: User, form: OrderCreate) -> Order:
             .values(stock=Item.stock - num, sold=Item.sold + num)
         )
         if result.rowcount != 1:
-            raise HTTPException(status_code=400, detail=f"{item.name} 库存不足")
+            _fail(
+                db,
+                user,
+                order.id,
+                "create_order",
+                "STOCK_NOT_ENOUGH",
+                f"{item.name} 库存不足，本次下单已取消，不会超卖",
+            )
 
+    write_audit(db, user.id, user.username, order.id, "create_order", True, "OK", "下单成功，库存已按条件更新扣减")
     db.commit()
     db.refresh(order)
     return order
@@ -84,15 +113,17 @@ def create_order(db: Session, user: User, form: OrderCreate) -> Order:
 
 def apply_pay_order(db: Session, user: User, form: PayApplyIn) -> PayOrder:
     if form.pay_type != BALANCE_PAY:
-        raise HTTPException(status_code=400, detail="目前只支持余额支付")
+        _fail(db, user, form.biz_order_no, "pay", "PAY_CHANNEL_UNSUPPORTED", "目前只支持余额支付")
 
     order = db.get(Order, form.biz_order_no)
     if order is None or order.user_id != user.id:
-        raise HTTPException(status_code=404, detail="订单不存在")
+        _fail(db, user, form.biz_order_no, "pay", "ORDER_NOT_FOUND", "订单不存在", 404)
+    if order.status == ORDER_PAID:
+        _fail(db, user, order.id, "pay", "PAY_ALREADY_SUCCESS", "同一订单已支付成功，不能重复发起支付")
     if order.status != ORDER_UNPAID:
-        raise HTTPException(status_code=400, detail="订单不是待支付状态")
+        _fail(db, user, order.id, "pay", "ORDER_NOT_PAYABLE", "订单不是待支付状态")
     if form.amount != order.total_fee:
-        raise HTTPException(status_code=400, detail="支付金额与订单不一致")
+        _fail(db, user, order.id, "pay", "AMOUNT_MISMATCH", "支付金额与订单不一致")
 
     existing = db.query(PayOrder).filter_by(biz_order_no=order.id).one_or_none()
     if existing is None:
@@ -112,9 +143,9 @@ def apply_pay_order(db: Session, user: User, form: PayApplyIn) -> PayOrder:
         return pay_order
 
     if existing.status == PAY_SUCCESS:
-        raise HTTPException(status_code=400, detail="订单已经支付")
+        _fail(db, user, order.id, "pay", "PAY_ALREADY_SUCCESS", "同一订单已支付成功，不能重复发起支付")
     if existing.status == PAY_CLOSED:
-        raise HTTPException(status_code=400, detail="订单已关闭")
+        _fail(db, user, order.id, "pay", "PAY_CLOSED", "支付单已关闭")
     if existing.pay_channel_code != form.pay_channel_code:
         existing.pay_channel_code = form.pay_channel_code
         existing.pay_type = form.pay_type
@@ -128,11 +159,14 @@ def apply_pay_order(db: Session, user: User, form: PayApplyIn) -> PayOrder:
 def pay_by_balance(db: Session, user: User, pay_order_id: int, password: str) -> None:
     pay_order = db.get(PayOrder, pay_order_id)
     if pay_order is None or pay_order.biz_user_id != user.id:
-        raise HTTPException(status_code=404, detail="支付单不存在")
+        _fail(db, user, None, "pay", "PAY_ORDER_NOT_FOUND", "支付单不存在", 404)
+    order_id = pay_order.biz_order_no
+    if pay_order.status == PAY_SUCCESS:
+        _fail(db, user, order_id, "pay", "PAY_ALREADY_SUCCESS", "同一订单已支付成功，不能重复支付，余额不会再次扣减")
     if pay_order.status != PAY_WAIT:
-        raise HTTPException(status_code=400, detail="交易已支付或关闭")
+        _fail(db, user, order_id, "pay", "PAY_CLOSED", "支付单已关闭，不能支付")
     if not verify_password(password, user.password):
-        raise HTTPException(status_code=400, detail="支付密码错误")
+        _fail(db, user, order_id, "pay", "PAY_PASSWORD_WRONG", "支付密码错误")
 
     deducted = db.execute(
         update(User)
@@ -140,7 +174,7 @@ def pay_by_balance(db: Session, user: User, pay_order_id: int, password: str) ->
         .values(balance=User.balance - pay_order.amount)
     )
     if deducted.rowcount != 1:
-        raise HTTPException(status_code=400, detail="余额不足")
+        _fail(db, user, order_id, "pay", "BALANCE_NOT_ENOUGH", "余额不足，本次未扣款")
 
     now = datetime.now()
     marked = db.execute(
@@ -149,13 +183,16 @@ def pay_by_balance(db: Session, user: User, pay_order_id: int, password: str) ->
         .values(status=PAY_SUCCESS, pay_success_time=now)
     )
     if marked.rowcount != 1:
-        raise HTTPException(status_code=400, detail="交易已支付或关闭")
+        _fail(db, user, order_id, "pay", "PAY_ALREADY_SUCCESS", "同一订单已支付成功，不能重复支付，余额不会再次扣减")
 
-    db.execute(
+    paid = db.execute(
         update(Order)
         .where(Order.id == pay_order.biz_order_no, Order.status == ORDER_UNPAID)
         .values(status=ORDER_PAID, pay_time=now)
     )
+    if paid.rowcount != 1:
+        _fail(db, user, order_id, "pay", "ORDER_NOT_PAYABLE", "订单不是待支付状态，本次支付已取消")
+    write_audit(db, user.id, user.username, order_id, "pay", True, "OK", "余额支付成功，只扣减一次")
     db.commit()
 
 
@@ -168,9 +205,13 @@ def refund_order(db: Session, user: User, order_id: int) -> Order:
         .one_or_none()
     )
     if order is None:
-        raise HTTPException(status_code=404, detail="订单不存在")
+        _fail(db, user, order_id, "refund", "ORDER_NOT_FOUND", "订单不存在", 404)
+    if order.status == ORDER_UNPAID:
+        _fail(db, user, order.id, "refund", "REFUND_NOT_PAID", "未支付订单不能退款")
+    if order.status == ORDER_REFUNDED:
+        _fail(db, user, order.id, "refund", "REFUND_ALREADY_DONE", "该订单已退款，不能重复退款")
     if order.status != ORDER_PAID:
-        raise HTTPException(status_code=400, detail="只有已付款订单可以退款")
+        _fail(db, user, order.id, "refund", "REFUND_STATE_INVALID", "当前订单状态不能退款")
 
     marked = db.execute(
         update(Order)
@@ -178,7 +219,7 @@ def refund_order(db: Session, user: User, order_id: int) -> Order:
         .values(status=ORDER_REFUNDED)
     )
     if marked.rowcount != 1:
-        raise HTTPException(status_code=400, detail="订单状态已变化")
+        _fail(db, user, order.id, "refund", "REFUND_ALREADY_DONE", "该订单已退款，不能重复退款")
 
     for line in order.details:
         item = db.get(Item, line.item_id)
@@ -191,6 +232,7 @@ def refund_order(db: Session, user: User, order_id: int) -> Order:
         .where(User.id == user.id)
         .values(balance=User.balance + order.total_fee)
     )
+    write_audit(db, user.id, user.username, order.id, "refund", True, "OK", "退款成功，库存和余额已回补")
     db.commit()
     db.refresh(order)
     return order
@@ -199,12 +241,18 @@ def refund_order(db: Session, user: User, order_id: int) -> Order:
 def change_unpaid_address(db: Session, user: User, order_id: int, street: str) -> None:
     street = street.strip()
     if len(street) < 4:
-        raise HTTPException(status_code=400, detail="地址太短")
+        _fail(db, user, order_id, "change_address", "ADDRESS_TOO_SHORT", "地址太短")
+    order = db.query(Order).filter(Order.id == order_id, Order.user_id == user.id).one_or_none()
+    if order is None:
+        _fail(db, user, order_id, "change_address", "ORDER_NOT_FOUND", "订单不存在", 404)
+    if order.status != ORDER_UNPAID:
+        _fail(db, user, order.id, "change_address", "ADDRESS_CHANGE_FORBIDDEN", "已支付订单不能修改收货地址")
     result = db.execute(
         update(Order)
         .where(Order.id == order_id, Order.user_id == user.id, Order.status == ORDER_UNPAID)
         .values(full_address=street[:256])
     )
     if result.rowcount != 1:
-        raise HTTPException(status_code=400, detail="只能修改未付款订单的地址")
+        _fail(db, user, order_id, "change_address", "ADDRESS_CHANGE_FORBIDDEN", "已支付订单不能修改收货地址")
+    write_audit(db, user.id, user.username, order.id, "change_address", True, "OK", "未支付订单地址已更新")
     db.commit()

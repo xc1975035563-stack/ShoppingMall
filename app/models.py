@@ -113,6 +113,22 @@ class PayOrder(Base):
     create_time: Mapped[datetime] = mapped_column(default=datetime.now)
 
 
+class TradeAudit(Base):
+    """下单、支付、退款、改地址的结果。成功和失败都留，方便对账时回答是谁改的。"""
+
+    __tablename__ = "trade_audit"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    username: Mapped[str] = mapped_column(String(32))
+    order_id: Mapped[int | None] = mapped_column(default=None)
+    action: Mapped[str] = mapped_column(String(32))
+    success: Mapped[int] = mapped_column(default=0)
+    code: Mapped[str] = mapped_column(String(32))
+    message: Mapped[str] = mapped_column(String(256))
+    create_time: Mapped[datetime] = mapped_column(default=datetime.now)
+
+
 class KnowledgeDoc(Base):
     __tablename__ = "knowledge_doc"
 

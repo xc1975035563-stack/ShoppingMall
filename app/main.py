@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session, joinedload
 from app.agent import ensure_knowledge
 from app.database import Base, SessionLocal, engine, get_db
 from app.lab_routes import router as lab_router
-from app.models import Address, Cart, Item, Order, User
+from app.models import Address, Cart, Item, Order, TradeAudit, User
 from app.schemas import (
     AddressIn,
     AddressOut,
@@ -22,6 +22,7 @@ from app.schemas import (
     LoginOut,
     OrderCreate,
     OrderOut,
+    AddressChangeIn,
     PayApplyIn,
     PayConfirmIn,
     PayOrderOut,
@@ -30,7 +31,7 @@ from app.schemas import (
 )
 from app.security import create_token, get_current_user, hash_password, verify_password
 from app.seed import seed
-from app.trade import apply_pay_order, create_order, pay_by_balance
+from app.trade import apply_pay_order, change_unpaid_address, create_order, pay_by_balance, refund_order
 
 FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
 
@@ -258,6 +259,51 @@ def get_order(
     db: Session = Depends(get_db),
 ):
     return _load_order(db, user, order_id)
+
+
+@app.post("/api/orders/{order_id}/address")
+def update_order_address(
+    order_id: int,
+    form: AddressChangeIn,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    change_unpaid_address(db, user, order_id, form.street)
+    return {"ok": True}
+
+
+@app.post("/api/orders/{order_id}/refund")
+def refund_paid_order(
+    order_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    refund_order(db, user, order_id)
+    db.refresh(user)
+    return {"ok": True, "balance": user.balance}
+
+
+@app.get("/api/trade-audits")
+def list_trade_audits(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    rows = (
+        db.query(TradeAudit)
+        .filter(TradeAudit.user_id == user.id)
+        .order_by(TradeAudit.id.desc())
+        .limit(50)
+        .all()
+    )
+    return [
+        {
+            "id": row.id,
+            "order_id": row.order_id,
+            "action": row.action,
+            "success": bool(row.success),
+            "code": row.code,
+            "message": row.message,
+            "create_time": row.create_time.isoformat(sep=" ", timespec="seconds"),
+        }
+        for row in rows
+    ]
 
 
 @app.post("/api/pay-orders", response_model=PayOrderOut)

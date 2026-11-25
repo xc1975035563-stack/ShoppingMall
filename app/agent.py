@@ -273,7 +273,10 @@ def _commit_pending(db: Session, user: User, pending: dict, trace: list[str]) ->
             change_unpaid_address(db, user, order_id, street)
             return f"订单 {order_id} 的地址已改为 {street}。", "confirm"
     except HTTPException as exc:
-        return str(exc.detail), "refuse"
+        detail = exc.detail
+        if isinstance(detail, dict):
+            return str(detail.get("message") or "操作失败"), "refuse"
+        return str(detail), "refuse"
     return "没有待确认的操作。", "refuse"
 
 

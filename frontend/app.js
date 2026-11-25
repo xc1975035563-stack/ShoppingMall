@@ -64,6 +64,12 @@ function showToast(message) {
   showToast.timer = setTimeout(() => { toast.hidden = true; }, 2200);
 }
 
+function errorText(data) {
+  if (data && typeof data.detail === "string") return data.detail;
+  if (data && data.detail && data.detail.message) return data.detail.message;
+  return "请求失败";
+}
+
 async function api(path, options = {}) {
   const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
   if (state.token) headers.Authorization = `Bearer ${state.token}`;
@@ -71,11 +77,12 @@ async function api(path, options = {}) {
   const data = await response.json().catch(() => ({}));
   if (response.status === 401) {
     logout(false);
-    showToast(data.detail || "请先登录");
-    throw new Error(data.detail || "请先登录");
+    const message = errorText(data);
+    showToast(message === "请求失败" ? "请先登录" : message);
+    throw new Error(message);
   }
   if (!response.ok) {
-    const message = data.detail || "请求失败";
+    const message = errorText(data);
     showToast(message);
     throw new Error(message);
   }
